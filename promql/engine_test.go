@@ -4733,6 +4733,37 @@ func TestSubQueryHistogramsCopy(t *testing.T) {
 	}
 }
 
+func TestHistogramQuantileForcedMonotonicityAnnotationPosition(t *testing.T) {
+	// A non-monotonic classic histogram triggers the forced monotonicity info
+	// annotation. Its position range must point at the histogram vector
+	// (histogram_quantile's first argument), not at the label string literal.
+	storage := promqltest.LoadedStorage(t, `load 1m
+		nonmonotonic_bucket{le="0.1"}   0+2x10
+		nonmonotonic_bucket{le="1"}     0+1x10
+		nonmonotonic_bucket{le="10"}    0+5x10
+		nonmonotonic_bucket{le="100"}   0+4x10
+		nonmonotonic_bucket{le="1000"}  0+9x10
+		nonmonotonic_bucket{le="+Inf"}  0+8x10
+	`)
+	t.Cleanup(func() { _ = storage.Close() })
+
+	engine := promqltest.NewTestEngine(t, false, 0, promqltest.DefaultMaxSamplesPerQuery)
+
+	// The vector argument starts at column 25: "histogram_quantile(0.5, " is 24 characters.
+	expr := `histogram_quantile(0.5, nonmonotonic_bucket)`
+	query, err := engine.NewInstantQuery(context.Background(), storage, nil, expr, timestamp.Time(0).Add(1*time.Minute))
+	require.NoError(t, err)
+	t.Cleanup(query.Close)
+
+	res := query.Exec(context.Background())
+	require.NoError(t, res.Err)
+
+	_, infos := res.Warnings.AsStrings(expr, 0, 0)
+	require.Len(t, infos, 1)
+	require.Contains(t, infos[0], "input to histogram_quantile needed to be fixed for monotonicity")
+	require.True(t, strings.HasSuffix(infos[0], "(1:25)"), "annotation should point at the histogram vector, got: %s", infos[0])
+}
+
 func TestHistogram_CounterResetHint(t *testing.T) {
 	baseT := timestamp.Time(0)
 	load := `
